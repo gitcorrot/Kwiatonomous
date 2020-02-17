@@ -2,10 +2,17 @@
    Kwiatonomous ver. 2 (Arduino nano)
 */
 
+#include <EEPROM.h>
 #include <LiquidCrystal_I2C.h>  // https://github.com/fdebrabander/Arduino-LiquidCrystal-I2C-library
 #include "RTClib.h"             // https://adafruit.github.io/RTClib/
 #include "DHT.h"                // https://github.com/adafruit/DHT-sensor-library
 
+
+#define EEPROM_WATERING_AMOUNT_ADDR     0
+#define EEPROM_WATERING_INTERVAL_ADDR   1
+#define EEPROM_MOISTURE_LEVEL_ADDR      2
+#define EEPROM_SCREEN_BRIGHTNESS_ADDR   3
+#define EEPROM_AUTO_LCD_OFF_ADDR        4
 
 #define JOYSTICK_X_PIN        A1
 #define JOYSTICK_Y_PIN        A2
@@ -30,21 +37,17 @@
 void updateDateTime();
 bool checkJoystick();
 void updateMenu();
-void waterPlant(int t)
+void waterPlant(int t);
 void joystickEvent(int event);
 void setScreenBrightness(int val);
 void checkForAutoLcdOff();
+void loadSettingsFromEEPROM();
 
 
 // Date and time
 RTC_DS1307 rtc;
 DateTime now;
 DateTime wateringDateTime;
-
-char daysOfTheWeek[7][13] = {
-  "Niedziela", "Poniedzialek", "Wtorek",
-  "Sroda", "Czwartek", "Piatek", "Sobota"
-};
 
 String dayStamp;
 String timeStamp;
@@ -53,13 +56,19 @@ unsigned long lastActionTime = 0;
 unsigned long lastDatetimeUpdateTime = 0;
 unsigned long lastSensorsUpdateTime = 0;
 
-// LCD
-LiquidCrystal_I2C lcd(0x27, 16, 2);
-bool lcdEnabled = true;
+char daysOfTheWeek[7][13] = {
+  "Niedziela", "Poniedzialek", "Wtorek",
+  "Sroda", "Czwartek", "Piatek", "Sobota"
+};
+
 
 // DHT 11
 DHT dht(DHT_11_PIN, DHT11);
 
+
+// LCD
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+bool lcdEnabled = true;
 
 // Custom characters
 byte forwardArrowSign[] = {
@@ -78,6 +87,7 @@ byte humiditySign[] = {
   B00100, B00100, B01110, B01110,
   B11111, B11111, B11111, B01110
 };
+
 
 // Joystick
 struct Joystick {
@@ -116,6 +126,7 @@ enum {
   - WYGASZANIE EKRANU (OFF/5s/10s/30s)            4
   - TEST PODLEWANIA                               5
 */
+
 String menu[] = {
   "DATA I GODZINA",               // 0
   "TEMPERATURA I WILGOTNOSC",     // 1
@@ -133,7 +144,7 @@ String settings[] = {
   "TEST PODLEWANIA",    // 5
 };
 
-int settingsWatering1[] = { // (capacity)
+int settingsWatering1[] = { // (amount)
   0, 5, 15, 30, 50, 100
 };
 
@@ -159,17 +170,18 @@ uint8_t settingsPage = 0;
 bool settingsOpened = false;
 
 
-// Settings               TODO: Save it in EEPROM and retrieve in setup.
+// Default settings
 int wateringAmount = 30;
-int wateringAmountNo = 3;
 int wateringInterval = 24;
-int wateringIntervalNo = 2;
 int moistureLevel = 50;
-int moistureLevelNo = 4;
 int screenBrightness = 100;
-int screenBrightnessNo = 4;
 int autoLcdOff = 10;
-int autoLcdOffNo = 2;
+
+uint8_t wateringAmountNo = 3;
+uint8_t wateringIntervalNo = 2;
+uint8_t moistureLevelNo = 4;
+uint8_t screenBrightnessNo = 4;
+uint8_t autoLcdOffNo = 2;
 
 
 // Sensors readings
@@ -212,15 +224,11 @@ void setup() {
   dht.begin();
 
 
-  // ******************************* //
-  // TODO: LOAD SETTINGS FROM EEPROM //
-  // ******************************* //
-
+  loadSettingsFromEEPROM();
 
   // Set next watering time
   wateringDateTime = rtc.now() + TimeSpan(0, wateringInterval, 0, 0);
 }
-
 
 void loop() {
   // Every 1s
@@ -266,7 +274,7 @@ bool checkJoystick() {
   bool action = false;
 
   joystick.X = analogRead(JOYSTICK_X_PIN);
-  if (joystick.X >= 800 && joystick.block == false) {
+  if (joystick.X >= 900 && joystick.block == false) {
     joystickEvent(EVENT_RIGHT);
     action = true;
   }
@@ -276,7 +284,7 @@ bool checkJoystick() {
   }
 
   joystick.Y = analogRead(JOYSTICK_Y_PIN);
-  if (joystick.Y >= 800 && joystick.block == false) {
+  if (joystick.Y >= 900 && joystick.block == false) {
     joystickEvent(EVENT_DOWN);
     action = true;
   }
@@ -286,8 +294,8 @@ bool checkJoystick() {
   }
 
   // Joystick released
-  if (joystick.X < 800 && joystick.X > 100 &&
-      joystick.Y < 800 && joystick.Y > 100 && joystick.block == true) {
+  if (joystick.X < 900 && joystick.X > 100 &&
+      joystick.Y < 900 && joystick.Y > 100 && joystick.block == true) {
     joystick.block = false;
   }
 
@@ -347,11 +355,18 @@ void updateMenu() {
           long ts = diff.totalseconds();
           lcd.print("NAST. PODLEWANIE");
           lcd.setCursor(0, 1);
-          lcd.print("ZA ");
-          lcd.print(ts / 3600);
-          lcd.print("h i ");
-          lcd.print(diff.minutes(), DEC);
-          lcd.print("min");
+
+          if (wateringInterval == 0) {
+            lcd.print("WILG. GLEBY <");
+            lcd.print(moistureLevel);
+            lcd.print("%");
+          } else {
+            lcd.print("ZA ");
+            lcd.print(ts / 3600);
+            lcd.print("h i ");
+            lcd.print(diff.minutes(), DEC);
+            lcd.print("min");
+          }
           break;
         }
       case 4: {
@@ -435,9 +450,9 @@ void updateMoisture() {
 }
 
 void updateTemperature() {
-  // TODO: EVERY 5 sec
   float at = dht.readTemperature();
   float ah = dht.readHumidity();
+
   if (isnan(ah) || isnan(at)) {
     Serial.println("Failed to read from DHT sensor!");
   } else {
@@ -448,14 +463,19 @@ void updateTemperature() {
   }
 }
 
-// Function that checks if it's time to water plant
+// Function that checks if it's time to water the plant
 void checkForWatering() {
   // Check if watering is turned OFF
-  if (wateringAmount == 0) {
+  if (wateringAmount == 0)
+    return;
+
+  // Watering is set to AUTO
+  if (wateringInterval == 0) {
     // TODO: check for moisture sensor reading
     return;
   }
 
+  // Watering has constant watering interval
   if (wateringDateTime <= now) {
     int delayTime = 0;
     switch (wateringAmount) {
@@ -543,23 +563,28 @@ void joystickEvent(int event) {
                 if (wateringAmountNo < 5) wateringAmountNo++;
                 else if (wateringAmountNo == 5) wateringAmountNo = 0;
                 wateringAmount = settingsWatering1[wateringAmountNo];
+                EEPROM.write(EEPROM_WATERING_AMOUNT_ADDR, wateringAmountNo);
                 break;
               }
             case 1: {
                 if (wateringIntervalNo < 5) wateringIntervalNo++;
                 else if (wateringIntervalNo == 5) wateringIntervalNo = 0;
                 wateringInterval = settingsWatering2[wateringIntervalNo];
+
                 // Update next watering DateTime
                 if (wateringIntervalNo != 0) { // If not auto
                   wateringDateTime = rtc.now() +
                                      TimeSpan(0, wateringInterval, 0, 0);
                 }
+
+                EEPROM.write(EEPROM_WATERING_INTERVAL_ADDR, wateringIntervalNo);
                 break;
               }
             case 2: {
                 if (moistureLevelNo < 9) moistureLevelNo++;
                 else if (moistureLevelNo == 9) moistureLevelNo = 0;
                 moistureLevel = settingsMoisture[moistureLevelNo];
+                EEPROM.write(EEPROM_MOISTURE_LEVEL_ADDR, moistureLevelNo);
                 break;
               }
             case 3: {
@@ -567,12 +592,14 @@ void joystickEvent(int event) {
                 else if (screenBrightnessNo == 4) screenBrightnessNo = 0;
                 screenBrightness = settingsBrightness[screenBrightnessNo];
                 setScreenBrightness(screenBrightness);
+                EEPROM.write(EEPROM_SCREEN_BRIGHTNESS_ADDR, screenBrightnessNo);
                 break;
               }
             case 4: {
                 if (autoLcdOffNo < 3) autoLcdOffNo++;
                 else if (autoLcdOffNo == 3) autoLcdOffNo = 0;
                 autoLcdOff = settingsAutoLcdOff[autoLcdOffNo];
+                EEPROM.write(EEPROM_AUTO_LCD_OFF_ADDR, autoLcdOffNo);
                 break;
               }
             case 5: {
@@ -609,5 +636,44 @@ void checkForAutoLcdOff() {
       lcd.display();
       lcd.backlight();
     }
+  }
+}
+
+
+void loadSettingsFromEEPROM() {
+  uint8_t temp_wateringAmountNo = EEPROM.read(EEPROM_WATERING_AMOUNT_ADDR);
+  uint8_t temp_wateringIntervalNo = EEPROM.read(EEPROM_WATERING_INTERVAL_ADDR);
+  uint8_t temp_moistureLevelNo = EEPROM.read(EEPROM_MOISTURE_LEVEL_ADDR);
+  uint8_t temp_screenBrightnessNo = EEPROM.read(EEPROM_SCREEN_BRIGHTNESS_ADDR);
+  uint8_t temp_autoLcdOffNo = EEPROM.read(EEPROM_AUTO_LCD_OFF_ADDR);
+
+  if (temp_wateringAmountNo != 255) {
+    wateringAmountNo = temp_wateringAmountNo;
+    wateringAmount = settingsWatering1[wateringAmountNo];
+    Serial.print("wateringAmountNo read from EEPROM, value: ");
+    Serial.println(wateringAmountNo);
+  } else {
+    Serial.print("There is no wateringAmountNo in EEPROM, value: ");
+    Serial.println(wateringAmountNo);
+  }
+
+  if (temp_wateringIntervalNo != 255) {
+    wateringIntervalNo = temp_wateringIntervalNo;
+    wateringInterval = settingsWatering2[wateringIntervalNo];
+  }
+
+  if (temp_moistureLevelNo != 255) {
+    moistureLevelNo = temp_moistureLevelNo;
+    moistureLevel = settingsMoisture[moistureLevelNo];
+  }
+
+  if (temp_screenBrightnessNo != 255) {
+    screenBrightnessNo = temp_screenBrightnessNo;
+    screenBrightness = settingsBrightness[screenBrightnessNo];
+  }
+
+  if (temp_autoLcdOffNo != 255) {
+    autoLcdOffNo = temp_autoLcdOffNo;
+    autoLcdOff = settingsAutoLcdOff[autoLcdOffNo];
   }
 }
