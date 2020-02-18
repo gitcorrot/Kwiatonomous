@@ -1,6 +1,8 @@
-/*
+/*------------------------------------------------------------------------
+
    Kwiatonomous ver. 2 (Arduino nano)
-*/
+
+  --------------------------------------------------------------------------*/
 
 #include <EEPROM.h>
 #include <LiquidCrystal_I2C.h>  // https://github.com/fdebrabander/Arduino-LiquidCrystal-I2C-library
@@ -32,16 +34,21 @@
 #define TIME_DRIFT_MS         11000   // 11 seconds drift per day
 #define DEBOUNCE_TIME         35      // ms
 
+//------------------------------------------------------------------------//
 
 // Functions declaration
 void updateDateTime();
 bool checkJoystick();
 void updateMenu();
+void updateMoisture();
+void checkForWatering();
+void updateTemperature();
 void waterPlant(int t);
 void joystickEvent(int event);
 void setScreenBrightness(int val);
 void checkForAutoLcdOff();
 void loadSettingsFromEEPROM();
+void clearEEPROM();
 
 
 // Date and time
@@ -55,6 +62,7 @@ unsigned long lastDebounceTime = 0;
 unsigned long lastActionTime = 0;
 unsigned long lastDatetimeUpdateTime = 0;
 unsigned long lastSensorsUpdateTime = 0;
+unsigned long lastMoistureBasedWateringTime = 0;
 
 char daysOfTheWeek[7][13] = {
   "Niedziela", "Poniedzialek", "Wtorek",
@@ -125,6 +133,10 @@ enum {
   - JASNOSC LCD (OFF/25%/50%/75%/100%)            3
   - WYGASZANIE EKRANU (OFF/5s/10s/30s)            4
   - TEST PODLEWANIA                               5
+  - GODZINA +1                                    6
+  - GODZINA -1                                    7
+  - MINUTA +1                                     8
+  - MINUTA -1                                     9
 */
 
 String menu[] = {
@@ -142,6 +154,10 @@ String settings[] = {
   "JASNOSC LCD",        // 3
   "WYGASZANIE EKR",     // 4
   "TEST PODLEWANIA",    // 5
+  "GODZINA +1",         // 6
+  "GODZINA -1",         // 7
+  "MINUTA +1",          // 8
+  "MINUTA -1",          // 9
 };
 
 int settingsWatering1[] = { // (amount)
@@ -189,6 +205,8 @@ float airTemperature = 0.00;
 float airHumidity = 0.00;
 float soilMoisture = 0.00;
 
+//------------------------------------------------------------------------//
+
 void setup() {
   Serial.begin(9600);
   pinMode(JOYSTICK_BUTTON_PIN, INPUT_PULLUP);
@@ -211,14 +229,13 @@ void setup() {
     while (1);
   }
 
-  //  rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-  //  rtc.adjust(DateTime(rtc.now().year(),
-  //                      rtc.now().month(),
-  //                      rtc.now().day(),
-  //                      rtc.now().hour(),
-  //                      rtc.now().minute(),
-  //                      rtc.now().second() + 15));
-  //  rtc.adjust(DateTime(2020, 2, 15, 12, 7, 0));
+//  rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+//  rtc.adjust(DateTime(rtc.now().year(),
+//                      rtc.now().month(),
+//                      rtc.now().day(),
+//                      rtc.now().hour(),
+//                      rtc.now().minute(),
+//                      rtc.now().second() + 15));
 
   //   Setup DHT11
   dht.begin();
@@ -247,9 +264,18 @@ void loop() {
   }
 
   // refresh LCD only if action taken or options not opened
-  if (checkJoystick() || !settingsOpened) {
+  if (checkJoystick()
+      || !settingsOpened
+      || (settingsOpened && settingsPage == 6)
+      || (settingsOpened && settingsPage == 7)
+      || (settingsOpened && settingsPage == 8)
+      || (settingsOpened && settingsPage == 9)) {
     updateMenu();
   }
+
+  //  Serial.println(joystick.X);
+  //  Serial.println(joystick.Y);
+  //  Serial.println();
 }
 
 void updateDateTime() {
@@ -257,45 +283,46 @@ void updateDateTime() {
   dayStamp = now.timestamp(DateTime::TIMESTAMP_DATE);
   timeStamp = now.timestamp(DateTime::TIMESTAMP_TIME);
 
-  // Adjust time
-  if (now.hour() == 3 && now.minute() == 0 && now.second() == 0) {
+  //   Adjust time
+  if (now.hour() == 23 && now.minute() == 0 && now.second() == 0) {
     Serial.println("DRIFT CORRECTION ROUTINE");
     delay(TIME_DRIFT_MS + 1000);
     rtc.adjust(DateTime(now.year(),
                         now.month(),
                         now.day(),
-                        3,          // hour
+                        23,          // hour
                         0,          // min
                         1));        // sec
   }
 }
 
+// Returns true if action was taken, else return false
 bool checkJoystick() {
   bool action = false;
 
   joystick.X = analogRead(JOYSTICK_X_PIN);
-  if (joystick.X >= 900 && joystick.block == false) {
+  if (joystick.X >= 800 && joystick.block == false) {
     joystickEvent(EVENT_RIGHT);
     action = true;
   }
-  else if (joystick.X <= 100 && joystick.block == false) {
+  else if (joystick.X <= 200 && joystick.block == false) {
     joystickEvent(EVENT_LEFT);
     action = true;
   }
 
   joystick.Y = analogRead(JOYSTICK_Y_PIN);
-  if (joystick.Y >= 900 && joystick.block == false) {
+  if (joystick.Y >= 800 && joystick.block == false) {
     joystickEvent(EVENT_DOWN);
     action = true;
   }
-  else if (joystick.Y <= 100 && joystick.block == false) {
+  else if (joystick.Y <= 200 && joystick.block == false) {
     joystickEvent(EVENT_UP);
     action = true;
   }
 
   // Joystick released
-  if (joystick.X < 900 && joystick.X > 100 &&
-      joystick.Y < 900 && joystick.Y > 100 && joystick.block == true) {
+  if (joystick.X < 800 && joystick.X > 200 &&
+      joystick.Y < 800 && joystick.Y > 200 && joystick.block == true) {
     joystick.block = false;
   }
 
@@ -429,7 +456,28 @@ void updateMenu() {
           break;
         }
       case 5: {
-          // TODO
+          lcd.setCursor(0, 1);
+          lcd.print("OSTROZNIE!!!");
+          break;
+        }
+      case 6: {
+          lcd.setCursor(4, 1);
+          lcd.print(timeStamp);
+          break;
+        }
+      case 7: {
+          lcd.setCursor(4, 1);
+          lcd.print(timeStamp);
+          break;
+        }
+      case 8: {
+          lcd.setCursor(4, 1);
+          lcd.print(timeStamp);
+          break;
+        }
+      case 9: {
+          lcd.setCursor(4, 1);
+          lcd.print(timeStamp);
           break;
         }
       default: {
@@ -469,51 +517,65 @@ void checkForWatering() {
   if (wateringAmount == 0)
     return;
 
-  // Watering is set to AUTO
+  // Watering is set to AUTO (based of soil moisture)
   if (wateringInterval == 0) {
-    // TODO: check for moisture sensor reading
-    return;
-  }
-
-  // Watering has constant watering interval
-  if (wateringDateTime <= now) {
-    int delayTime = 0;
-    switch (wateringAmount) {
-      case 5: {
-          delayTime = TIME_5_ML;
-          break;
-        }
-      case 15: {
-          delayTime = TIME_15_ML;
-          break;
-        }
-      case 30: {
-          delayTime = TIME_30_ML;
-          break;
-        }
-      case 50: {
-          delayTime = TIME_50_ML;
-          break;
-        }
-      case 100: {
-          delayTime = TIME_100_ML;
-          break;
-        }
-      default: {
-          Serial.println("Error! Wrong wateringAmount value!");
-        }
+    // Every 30min
+    long moistureBasedWateringInterval = 1800000; // 30min
+    if (millis() - lastMoistureBasedWateringTime >= moistureBasedWateringInterval) {
+      if (soilMoisture != 0 && soilMoisture < moistureLevel) {
+        waterPlant();
+      }
+      lastMoistureBasedWateringTime = millis();
     }
-
-    waterPlant(delayTime);
-    wateringDateTime = rtc.now() + TimeSpan(0, wateringInterval, 0, 0);
+    // Watering has constant watering interval
+  } else {
+    if (wateringDateTime <= now) {
+      waterPlant();
+      wateringDateTime = rtc.now() + TimeSpan(0, wateringInterval, 0, 0);
+    }
   }
 }
 
 // Function that activate water pump for time t
-void waterPlant(int t) {
+void waterPlant() {
+  Serial.println("Watering plant!");
+
+  int delayTime = 0;
+  switch (wateringAmount) {
+    case 5: {
+        delayTime = TIME_5_ML;
+        break;
+      }
+    case 15: {
+        delayTime = TIME_15_ML;
+        break;
+      }
+    case 30: {
+        delayTime = TIME_30_ML;
+        break;
+      }
+    case 50: {
+        delayTime = TIME_50_ML;
+        break;
+      }
+    case 100: {
+        delayTime = TIME_100_ML;
+        break;
+      }
+    default: {
+        Serial.println("Error! Wrong wateringAmount value!");
+      }
+  }
+
   digitalWrite(RELAY_PIN, HIGH); // TURNS ON PUMP
-  delay(t);
+  delay(delayTime);
   digitalWrite(RELAY_PIN, LOW); // TURNS OFF PUMP
+}
+
+void waterPlantTest() {
+  digitalWrite(RELAY_PIN, HIGH);
+  delay(TIME_15_ML);
+  digitalWrite(RELAY_PIN, LOW);
 }
 
 void joystickEvent(int event) {
@@ -529,7 +591,7 @@ void joystickEvent(int event) {
         }
         else {
           if (settingsPage > 0) settingsPage--;
-          else if (settingsPage == 0) settingsPage = 5;
+          else if (settingsPage == 0) settingsPage = 9;
         }
         break;
       }
@@ -539,8 +601,8 @@ void joystickEvent(int event) {
           else if (menuPage == 4) menuPage = 0;
         }
         else {
-          if (settingsPage < 5) settingsPage++;
-          else if (settingsPage == 5) settingsPage = 0;
+          if (settingsPage < 9) settingsPage++;
+          else if (settingsPage == 9) settingsPage = 0;
         }
         break;
       }
@@ -572,10 +634,10 @@ void joystickEvent(int event) {
                 wateringInterval = settingsWatering2[wateringIntervalNo];
 
                 // Update next watering DateTime
-                if (wateringIntervalNo != 0) { // If not auto
-                  wateringDateTime = rtc.now() +
-                                     TimeSpan(0, wateringInterval, 0, 0);
-                }
+                wateringDateTime = rtc.now() + TimeSpan(wateringInterval / 24,
+                                                        wateringInterval % 24, 0, 0);
+                Serial.print("Setting new watering time: ");
+                Serial.println(wateringDateTime.timestamp(DateTime::TIMESTAMP_FULL));
 
                 EEPROM.write(EEPROM_WATERING_INTERVAL_ADDR, wateringIntervalNo);
                 break;
@@ -603,7 +665,43 @@ void joystickEvent(int event) {
                 break;
               }
             case 5: {
-                // TODO: TEST PUMP
+                waterPlantTest();
+                break;
+              }
+            case 6: {
+                rtc.adjust(DateTime(rtc.now().year(),
+                                    rtc.now().month(),
+                                    rtc.now().day(),
+                                    rtc.now().hour() + 1,
+                                    rtc.now().minute(),
+                                    rtc.now().second()));
+                break;
+              }
+            case 7: {
+                rtc.adjust(DateTime(rtc.now().year(),
+                                    rtc.now().month(),
+                                    rtc.now().day(),
+                                    rtc.now().hour() - 1,
+                                    rtc.now().minute(),
+                                    rtc.now().second()));
+                break;
+              }
+            case 8: {
+                rtc.adjust(DateTime(rtc.now().year(),
+                                    rtc.now().month(),
+                                    rtc.now().day(),
+                                    rtc.now().hour(),
+                                    rtc.now().minute() + 1,
+                                    rtc.now().second()));
+                break;
+              }
+            case 9: {
+                rtc.adjust(DateTime(rtc.now().year(),
+                                    rtc.now().month(),
+                                    rtc.now().day(),
+                                    rtc.now().hour(),
+                                    rtc.now().minute() - 1,
+                                    rtc.now().second()));
                 break;
               }
           }
@@ -650,11 +748,6 @@ void loadSettingsFromEEPROM() {
   if (temp_wateringAmountNo != 255) {
     wateringAmountNo = temp_wateringAmountNo;
     wateringAmount = settingsWatering1[wateringAmountNo];
-    Serial.print("wateringAmountNo read from EEPROM, value: ");
-    Serial.println(wateringAmountNo);
-  } else {
-    Serial.print("There is no wateringAmountNo in EEPROM, value: ");
-    Serial.println(wateringAmountNo);
   }
 
   if (temp_wateringIntervalNo != 255) {
@@ -670,10 +763,17 @@ void loadSettingsFromEEPROM() {
   if (temp_screenBrightnessNo != 255) {
     screenBrightnessNo = temp_screenBrightnessNo;
     screenBrightness = settingsBrightness[screenBrightnessNo];
+    setScreenBrightness(screenBrightness);
   }
 
   if (temp_autoLcdOffNo != 255) {
     autoLcdOffNo = temp_autoLcdOffNo;
     autoLcdOff = settingsAutoLcdOff[autoLcdOffNo];
+  }
+}
+
+void clearEEPROM() {
+  for (int i = 0 ; i < EEPROM.length() ; i++) {
+    EEPROM.write(i, 255);
   }
 }
