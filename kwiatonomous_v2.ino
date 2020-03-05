@@ -2,6 +2,10 @@
 
    Kwiatonomous ver. 2 (Arduino nano)
 
+   TODO: 
+   - Make Menu class and clean code
+   - 
+
   --------------------------------------------------------------------------*/
 
 #include <EEPROM.h>
@@ -15,6 +19,7 @@
 #define EEPROM_MOISTURE_LEVEL_ADDR      2
 #define EEPROM_SCREEN_BRIGHTNESS_ADDR   3
 #define EEPROM_AUTO_LCD_OFF_ADDR        4
+#define EEPROM_NEXT_WATERING_DATE_ADDR  5 // 5-9 (long, 4 byes)
 
 #define JOYSTICK_X_PIN        A1
 #define JOYSTICK_Y_PIN        A2
@@ -41,14 +46,19 @@ void updateDateTime();
 bool checkJoystick();
 void updateMenu();
 void updateMoisture();
-void checkForWatering();
 void updateTemperature();
-void waterPlant(int t);
+void checkForWatering();
+void waterPlant();
+void waterPlantTest();
 void joystickEvent(int event);
 void setScreenBrightness(int val);
 void checkForAutoLcdOff();
 void loadSettingsFromEEPROM();
 void clearEEPROM();
+unsigned long EEPROM_readlong(int address);
+void EEPROM_writeint(int address, int value);
+void EEPROM_writelong(int address, unsigned long value);
+unsigned int EEPROM_readint(int address);
 
 
 // Date and time
@@ -127,7 +137,7 @@ enum {
 
           OPCJE
   - PODLEWANIE 1 (OFF/5ml/15ml/30ml, 50ml, 100ml) 0
-  - PODLEWANIE 2 (AUTO, 6h, 12h, 24h, 48h, 168h)  1
+  - PODLEWANIE 2 (AUTO, 6h, 12h, 24h, 48h, 168h)  1 // changed to days
   - WIGLOTNOSC (10%, 20%, 30%, 40%, 50%,
                 60%, 70%, 80%, 90%, bagno)        2
   - JASNOSC LCD (OFF/25%/50%/75%/100%)            3
@@ -164,9 +174,14 @@ int settingsWatering1[] = { // (amount)
   0, 5, 15, 30, 50, 100
 };
 
-int settingsWatering2[] = { // (interval)
-  0,  6, 12, 24, 48, 168
+//int settingsWatering2[] = { // (interval)
+//  0, 6, 12, 24, 48, 168
+//};
+
+int settingsWatering2[] = { // (interval) (14)
+  0, 1, 2, 3, 4, 5, 6, 7, 9, 11, 14, 17, 21, 28
 };
+
 
 int settingsMoisture[] = {
   0, 10, 20, 30, 40, 50,
@@ -194,7 +209,7 @@ int screenBrightness = 100;
 int autoLcdOff = 10;
 
 uint8_t wateringAmountNo = 3;
-uint8_t wateringIntervalNo = 2;
+uint8_t wateringIntervalNo = 1;
 uint8_t moistureLevelNo = 4;
 uint8_t screenBrightnessNo = 4;
 uint8_t autoLcdOffNo = 2;
@@ -229,13 +244,13 @@ void setup() {
     while (1);
   }
 
-//  rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-//  rtc.adjust(DateTime(rtc.now().year(),
-//                      rtc.now().month(),
-//                      rtc.now().day(),
-//                      rtc.now().hour(),
-//                      rtc.now().minute(),
-//                      rtc.now().second() + 15));
+  //  rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  //  rtc.adjust(DateTime(rtc.now().year(),
+  //                      rtc.now().month(),
+  //                      rtc.now().day(),
+  //                      rtc.now().hour(),
+  //                      rtc.now().minute(),
+  //                      rtc.now().second() + 15));
 
   //   Setup DHT11
   dht.begin();
@@ -424,7 +439,7 @@ void updateMenu() {
           if (wateringInterval == 0) {
             lcd.print("AUTO");
           } else {
-            lcd.print(wateringInterval); lcd.print("h");
+            lcd.print(wateringInterval); lcd.print(" dni");
           }
           break;
         }
@@ -629,17 +644,20 @@ void joystickEvent(int event) {
                 break;
               }
             case 1: {
-                if (wateringIntervalNo < 5) wateringIntervalNo++;
-                else if (wateringIntervalNo == 5) wateringIntervalNo = 0;
+                if (wateringIntervalNo < 14) wateringIntervalNo++;
+                else if (wateringIntervalNo == 14) wateringIntervalNo = 0;
                 wateringInterval = settingsWatering2[wateringIntervalNo];
 
                 // Update next watering DateTime
-                wateringDateTime = rtc.now() + TimeSpan(wateringInterval / 24,
-                                                        wateringInterval % 24, 0, 0);
+                wateringDateTime = rtc.now() + TimeSpan(wateringInterval, 0, 0, 0);
+
                 Serial.print("Setting new watering time: ");
                 Serial.println(wateringDateTime.timestamp(DateTime::TIMESTAMP_FULL));
 
                 EEPROM.write(EEPROM_WATERING_INTERVAL_ADDR, wateringIntervalNo);
+
+                uint32_t wateringDateTimeUnix = wateringDateTime.unixtime();
+                EEPROM_writelong(EEPROM_NEXT_WATERING_DATE_ADDR, wateringDateTimeUnix);
                 break;
               }
             case 2: {
@@ -737,13 +755,13 @@ void checkForAutoLcdOff() {
   }
 }
 
-
 void loadSettingsFromEEPROM() {
   uint8_t temp_wateringAmountNo = EEPROM.read(EEPROM_WATERING_AMOUNT_ADDR);
   uint8_t temp_wateringIntervalNo = EEPROM.read(EEPROM_WATERING_INTERVAL_ADDR);
   uint8_t temp_moistureLevelNo = EEPROM.read(EEPROM_MOISTURE_LEVEL_ADDR);
   uint8_t temp_screenBrightnessNo = EEPROM.read(EEPROM_SCREEN_BRIGHTNESS_ADDR);
   uint8_t temp_autoLcdOffNo = EEPROM.read(EEPROM_AUTO_LCD_OFF_ADDR);
+  uint32_t temp_next_watering_date = EEPROM_readlong(EEPROM_NEXT_WATERING_DATE_ADDR);
 
   if (temp_wateringAmountNo != 255) {
     wateringAmountNo = temp_wateringAmountNo;
@@ -770,10 +788,42 @@ void loadSettingsFromEEPROM() {
     autoLcdOffNo = temp_autoLcdOffNo;
     autoLcdOff = settingsAutoLcdOff[autoLcdOffNo];
   }
+
+  if (temp_next_watering_date != 255 ) {
+    wateringDateTime = DateTime(temp_next_watering_date);
+  }
 }
 
 void clearEEPROM() {
   for (int i = 0 ; i < EEPROM.length() ; i++) {
     EEPROM.write(i, 255);
   }
+}
+
+// https://forum.arduino.cc/index.php?topic=45220.0
+// Read double word from EEPROM
+unsigned long EEPROM_readlong(int address) {
+  unsigned long dword = EEPROM_readint(address);
+  dword = dword << 16;
+  dword = dword | EEPROM_readint(address + 2);
+  return dword;
+}
+
+// Write word to EEPROM
+void EEPROM_writeint(int address, int value) {
+  EEPROM.write(address, highByte(value));
+  EEPROM.write(address + 1 , lowByte(value));
+}
+
+// Write long integer into EEPROM
+void EEPROM_writelong(int address, unsigned long value) {
+  EEPROM_writeint(address + 2, word(value));
+  value = value >> 16;
+  EEPROM_writeint(address, word(value));
+}
+
+// Read 16-bit integer
+unsigned int EEPROM_readint(int address) {
+  unsigned int word = word(EEPROM.read(address), EEPROM.read(address + 1));
+  return word;
 }
